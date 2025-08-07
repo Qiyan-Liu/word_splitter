@@ -61,11 +61,14 @@ python main.py
 
 ```
 word-document-splitter/
-├── main.py                 # 主程序入口，包含用户配置参数
-├── word_splitter.py        # 核心拆分逻辑和文档处理器
+├── main.py                 # 主程序入口（启动器）
+├── src/                    # 源代码目录
+│   ├── __init__.py        # 包初始化文件
+│   ├── app.py             # 主程序实现，包含用户配置参数
+│   └── word_splitter.py   # 核心拆分逻辑和文档处理器
 ├── requirements.txt        # 项目依赖列表
-├── README.md              # 项目说明文档
-├── run_splitter.bat       # Windows批处理脚本（可选）
+├── README.md              # 项目说明文档（中文）
+├── README_EN.md           # 项目说明文档（英文）
 ├── word_splitter.log      # 程序运行日志（自动生成）
 ├── __pycache__/           # Python缓存目录（自动生成）
 ├── input/                 # 输入文档目录（需要手动创建）
@@ -89,7 +92,7 @@ word-document-splitter/
 ### 基本使用流程
 
 1. **准备文档**: 将要拆分的Word文档放入`input`目录
-2. **配置参数**: 根据需要修改`main.py`中的配置参数
+2. **配置参数**: 根据需要修改`src/app.py`中的配置参数
 3. **运行程序**: 执行`python main.py`
 4. **查看结果**: 在`output`目录中查看拆分后的文档
 

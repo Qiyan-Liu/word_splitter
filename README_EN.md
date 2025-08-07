@@ -61,12 +61,14 @@ python main.py
 
 ```
 word-document-splitter/
-├── main.py                 # Main program entry, contains user configuration parameters
-├── word_splitter.py        # Core splitting logic and document processor
+├── main.py                 # Main program entry (launcher)
+├── src/                    # Source code directory
+│   ├── __init__.py        # Package initialization file
+│   ├── app.py             # Main program implementation, contains user configuration parameters
+│   └── word_splitter.py   # Core splitting logic and document processor
 ├── requirements.txt        # Project dependency list
 ├── README.md              # Project documentation (Chinese)
 ├── README_EN.md           # Project documentation (English)
-├── run_splitter.bat       # Windows batch script (optional)
 ├── word_splitter.log      # Program run log (auto-generated)
 ├── __pycache__/           # Python cache directory (auto-generated)
 ├── input/                 # Input document directory (manually created)
@@ -90,7 +92,7 @@ word-document-splitter/
 ### Basic Usage Flow
 
 1. **Prepare Documents**: Place Word documents to be split in the `input` directory
-2. **Configure Parameters**: Modify configuration parameters in `main.py` as needed
+2. **Configure Parameters**: Modify configuration parameters in `src/app.py` as needed
 3. **Run Program**: Execute `python main.py`
 4. **View Results**: Check split documents in the `output` directory
 
