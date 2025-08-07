@@ -26,7 +26,7 @@
 ### 1. 克隆或下载项目
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/Qiyan-Liu/word_splitter.git
 cd word-document-splitter
 ```
 
@@ -115,7 +115,6 @@ word-document-splitter/
 4. **章节格式识别**:
    - 中文: `一、`, `二、`, `三、`...
    - 数字: `1、`, `2、`, `3、`...
-   - 常见标题关键词: `绪论`, `引言`, `结论`, `参考文献`等
 
 ### 拆分逻辑说明
 
