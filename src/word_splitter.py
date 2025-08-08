@@ -676,11 +676,32 @@ class WordDocumentSplitter:
                     try:
                         new_style = target_doc.styles.add_style(style.name, style.type)
                         
-                        # Copy style font attributes
+                        # Copy style font attributes - improved for Chinese fonts
                         if hasattr(style, 'font') and hasattr(new_style, 'font'):
                             try:
+                                # Copy basic font name
                                 if style.font.name:
                                     new_style.font.name = style.font.name
+                                
+                                # Copy detailed font information from XML for better Chinese font support
+                                if hasattr(style.font, '_element') and hasattr(new_style.font, '_element'):
+                                    w_ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+                                    source_rfonts = style.font._element.find(f'.//{{{w_ns}}}rFonts')
+                                    if source_rfonts is not None:
+                                        # Get or create target rFonts element
+                                        target_rfonts = new_style.font._element.find(f'.//{{{w_ns}}}rFonts')
+                                        if target_rfonts is None:
+                                            from xml.etree.ElementTree import Element
+                                            target_rfonts = Element(f'{{{w_ns}}}rFonts')
+                                            new_style.font._element.append(target_rfonts)
+                                        
+                                        # Copy all font attributes including theme fonts
+                                        font_attrs = ['ascii', 'eastAsia', 'hAnsi', 'cs', 'asciiTheme', 'eastAsiaTheme', 'hAnsiTheme', 'csTheme']
+                                        for attr in font_attrs:
+                                            font_value = source_rfonts.get(f'{{{w_ns}}}{attr}')
+                                            if font_value:
+                                                target_rfonts.set(f'{{{w_ns}}}{attr}', font_value)
+                                
                                 if style.font.size:
                                     new_style.font.size = style.font.size
                                 if style.font.bold is not None:
@@ -738,6 +759,9 @@ class WordDocumentSplitter:
                                 existing_style.font.size = style.font.size
                     except Exception as e:
                         logger.debug(f"Failed to update existing style: {e}")
+            
+            # Ensure Hyperlink style exists in target document
+            self._ensure_hyperlink_style(target_doc)
             
         except Exception as e:
             logger.warning(f"Style copy warning: {e}")
@@ -861,44 +885,307 @@ class WordDocumentSplitter:
             except Exception as e:
                 logger.debug(f"Failed to copy paragraph format: {e}")
             
-            # Copy runs
-            for run in source_para.runs:
-                try:
-                    # Check if run contains images
-                    images_in_run = self._get_images_from_run(run, source_doc_part)
-                    
-                    if images_in_run:
-                        # If run contains images, add text first, then add images
-                        if run.text:
-                            new_run = new_para.add_run(run.text)
-                            self._copy_run_format(run, new_run, source_para, new_para)
+            # Check if paragraph contains hyperlinks that need special handling
+            has_hyperlinks = self._paragraph_has_hyperlinks(source_para)
+            
+            if has_hyperlinks:
+                # Handle hyperlinks separately to avoid duplication
+                self._copy_paragraph_hyperlinks(source_para, new_para, source_doc_part)
+            else:
+                # Copy runs normally for paragraphs without hyperlinks
+                for run in source_para.runs:
+                    try:
+                        # Check if run contains images
+                        images_in_run = self._get_images_from_run(run, source_doc_part)
                         
-                        # Add images
-                        for image_data in images_in_run:
-                            try:
-                                new_run = new_para.add_run()
-                                new_run.add_picture(image_data['stream'], width=image_data['width'], height=image_data['height'])
-                            except Exception as e:
-                                logger.warning(f"Failed to copy image: {e}")
-                                # If image copy fails, add placeholder text
-                                new_run = new_para.add_run("[Image]")
-                    else:
-                        # Regular text run
-                        if run.text:  # Only copy runs with text
-                            new_run = new_para.add_run(run.text)
-                            self._copy_run_format(run, new_run, source_para, new_para)
+                        if images_in_run:
+                            # If run contains images, add text first, then add images
+                            if run.text:
+                                new_run = new_para.add_run(run.text)
+                                self._copy_run_format(run, new_run, source_para, new_para)
+                                # Copy hyperlink if exists
+                                self._copy_hyperlink(run, new_run, source_para, new_para)
                             
-                            # If run has no font name but paragraph has default font, apply default font
-                            if (not new_run.font.name and 
-                                hasattr(new_para, '_default_font_name') and 
-                                new_para._default_font_name):
-                                new_run.font.name = new_para._default_font_name
-                except Exception as e:
-                    logger.debug(f"Failed to copy run: {e}")
-                    continue
+                            # Add images
+                            for image_data in images_in_run:
+                                try:
+                                    new_run = new_para.add_run()
+                                    new_run.add_picture(image_data['stream'], width=image_data['width'], height=image_data['height'])
+                                except Exception as e:
+                                    logger.warning(f"Failed to copy image: {e}")
+                                    # If image copy fails, add placeholder text
+                                    new_run = new_para.add_run("[Image]")
+                        else:
+                            # Regular text run
+                            if run.text:  # Only copy runs with text
+                                new_run = new_para.add_run(run.text)
+                                self._copy_run_format(run, new_run, source_para, new_para)
+                                # Copy hyperlink if exists
+                                self._copy_hyperlink(run, new_run, source_para, new_para)
+                            
+                                # If run has no font name but paragraph has default font, apply default font
+                                if (not new_run.font.name and 
+                                    hasattr(new_para, '_default_font_name') and 
+                                    new_para._default_font_name):
+                                    new_run.font.name = new_para._default_font_name
+                    except Exception as e:
+                        logger.debug(f"Failed to copy run: {e}")
+                        continue
                 
         except Exception as e:
             logger.warning(f"Paragraph copy warning: {e}")
+    
+    def _paragraph_has_hyperlinks(self, source_para):
+        """Check if paragraph contains hyperlinks (both standard and HYPERLINK fields)"""
+        try:
+            if hasattr(source_para, '_element') and source_para._element is not None:
+                w_ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+                
+                # Check for standard w:hyperlink elements
+                hyperlink_elems = source_para._element.findall(f'.//{{{w_ns}}}hyperlink')
+                if hyperlink_elems:
+                    return True
+                
+                # Check for HYPERLINK field codes
+                instr_text_elems = source_para._element.findall(f'.//{{{w_ns}}}instrText')
+                for instr_elem in instr_text_elems:
+                    if instr_elem.text and 'HYPERLINK' in instr_elem.text:
+                        return True
+                        
+            return False
+        except Exception as e:
+            logger.debug(f"Failed to check hyperlinks: {e}")
+            return False
+    
+    def _copy_paragraph_hyperlinks(self, source_para, target_para, source_doc_part):
+        """Copy all content from paragraph with hyperlinks, maintaining visual text order"""
+        try:
+            if hasattr(source_para, '_element') and source_para._element is not None:
+                # Get hyperlink information from source paragraph first
+                hyperlink_info = self._extract_hyperlink_info(source_para)
+                
+                # Copy only runs that contain actual text, skip empty runs
+                # Store run information for later hyperlink application
+                copied_runs = []
+                for run in source_para.runs:
+                    if run.text.strip():  # Only copy runs with non-empty text
+                        new_run = target_para.add_run(run.text)
+                        self._copy_run_format(run, new_run, source_para, target_para)
+                        copied_runs.append((new_run, run.text.strip()))
+                    
+                    # Handle images in run
+                    images_in_run = self._get_images_from_run(run, source_doc_part)
+                    for image_data in images_in_run:
+                        try:
+                            img_run = target_para.add_run()
+                            img_run.add_picture(image_data['stream'], width=image_data['width'], height=image_data['height'])
+                        except Exception as e:
+                            logger.warning(f"Failed to copy image: {e}")
+                            img_run = target_para.add_run("[Image]")
+                
+                # Apply hyperlinks after all runs are copied to maintain order
+                for new_run, run_text in copied_runs:
+                    for hyperlink in hyperlink_info:
+                        if run_text == hyperlink['text'].strip():
+                            self._add_hyperlink_to_run(new_run, hyperlink['url'], run_text)
+                            break
+                        
+        except Exception as e:
+            logger.debug(f"Failed to copy paragraph hyperlinks: {e}")
+    
+    def _extract_hyperlink_info(self, source_para):
+        """Extract hyperlink information from source paragraph"""
+        hyperlink_info = []
+        try:
+            if hasattr(source_para, '_element') and source_para._element is not None:
+                w_ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+                
+                # Find all instrText elements that contain HYPERLINK
+                instr_text_elems = source_para._element.findall(f'.//{{{w_ns}}}instrText')
+                
+                for instr_elem in instr_text_elems:
+                    if instr_elem.text and 'HYPERLINK' in instr_elem.text:
+                        try:
+                            # Extract URL from HYPERLINK field
+                            hyperlink_text = instr_elem.text
+                            import re
+                            url_match = re.search(r'HYPERLINK\s+"([^"]+)"', hyperlink_text)
+                            
+                            if url_match:
+                                url = url_match.group(1)
+                                logger.debug(f"Found HYPERLINK field with URL: {url}")
+                                
+                                # Extract the display text for this hyperlink
+                                display_text = self._extract_hyperlink_field_text(source_para._element, instr_elem)
+                                
+                                if display_text:
+                                    hyperlink_info.append({
+                                        'text': display_text,
+                                        'url': url
+                                    })
+                                    logger.debug(f"Extracted hyperlink: text='{display_text}', url='{url}'")
+                                    
+                        except Exception as e:
+                            logger.debug(f"Failed to process HYPERLINK field: {e}")
+                            
+        except Exception as e:
+            logger.debug(f"Failed to extract hyperlink info: {e}")
+        
+        return hyperlink_info
+    
+    def _extract_hyperlink_field_text(self, para_elem, instr_elem):
+        """Extract the display text from a HYPERLINK field"""
+        try:
+            w_ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+            
+            # Find the run containing the instrText
+            instr_run = instr_elem.getparent()
+            if instr_run is None:
+                return None
+            
+            # Find all runs in the paragraph
+            all_runs = para_elem.findall(f'.//{{{w_ns}}}r')
+            instr_run_index = -1
+            
+            # Find the index of the run containing instrText
+            for i, run in enumerate(all_runs):
+                if instr_elem in run:
+                    instr_run_index = i
+                    break
+            
+            if instr_run_index == -1:
+                return None
+            
+            # Look for fldChar with fldCharType="separate" after the instrText
+            # The text after "separate" and before "end" is the display text
+            hyperlink_texts = []
+            found_separate = False
+            
+            for i in range(instr_run_index, len(all_runs)):
+                run = all_runs[i]
+                
+                # Check for fldChar elements
+                fld_chars = run.findall(f'{{{w_ns}}}fldChar')
+                for fld_char in fld_chars:
+                    fld_char_type = fld_char.get(f'{{{w_ns}}}fldCharType')
+                    if fld_char_type == 'separate':
+                        found_separate = True
+                    elif fld_char_type == 'end' and found_separate:
+                        # End of field, return collected text
+                        return ''.join(hyperlink_texts)
+                
+                # If we found separate, collect text from subsequent runs
+                if found_separate:
+                    # Check if this run has fldChar end, if so, don't include text after it
+                    has_end = any(fc.get(f'{{{w_ns}}}fldCharType') == 'end' for fc in fld_chars)
+                    if has_end:
+                        # This run contains the end marker, don't include its text
+                        break
+                    
+                    # Collect text from this run
+                    text_elems = run.findall(f'{{{w_ns}}}t')
+                    for text_elem in text_elems:
+                        if text_elem.text:
+                            hyperlink_texts.append(text_elem.text)
+            
+            return ''.join(hyperlink_texts) if hyperlink_texts else None
+            
+        except Exception as e:
+            logger.debug(f"Failed to extract hyperlink field text: {e}")
+            return None
+    
+    def _copy_hyperlink_field_formatting(self, para_elem, instr_elem, target_run):
+        """Copy formatting from hyperlink field text to target run"""
+        try:
+            w_ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+            
+            # Find the run containing the instrText
+            instr_run = instr_elem.getparent()
+            if instr_run is None:
+                return
+            
+            # Find all runs in the paragraph
+            all_runs = para_elem.findall(f'.//{{{w_ns}}}r')
+            instr_run_index = -1
+            
+            # Find the index of the run containing instrText
+            for i, run in enumerate(all_runs):
+                if instr_elem in run:
+                    instr_run_index = i
+                    break
+            
+            if instr_run_index == -1:
+                return
+            
+            # Look for the first text run after fldChar separate
+            found_separate = False
+            
+            for i in range(instr_run_index, len(all_runs)):
+                run = all_runs[i]
+                
+                # Check for fldChar elements
+                fld_chars = run.findall(f'{{{w_ns}}}fldChar')
+                for fld_char in fld_chars:
+                    fld_char_type = fld_char.get(f'{{{w_ns}}}fldCharType')
+                    if fld_char_type == 'separate':
+                        found_separate = True
+                    elif fld_char_type == 'end' and found_separate:
+                        return
+                
+                # If we found separate and this run has text, copy its formatting
+                if found_separate:
+                    text_elems = run.findall(f'{{{w_ns}}}t')
+                    if text_elems:
+                        # Copy formatting from this run
+                        rpr_elem = run.find(f'{{{w_ns}}}rPr')
+                        if rpr_elem is not None:
+                            self._apply_run_format_from_xml(target_run, rpr_elem)
+                        return
+            
+        except Exception as e:
+            logger.debug(f"Failed to copy hyperlink field formatting: {e}")
+    
+    def _apply_run_format_from_xml(self, run, rpr_elem):
+        """Apply run formatting from XML rPr element"""
+        try:
+            w_ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+            
+            # Font name
+            rfonts_elem = rpr_elem.find(f'{{{w_ns}}}rFonts')
+            if rfonts_elem is not None:
+                ascii_font = rfonts_elem.get(f'{{{w_ns}}}ascii')
+                if ascii_font:
+                    run.font.name = ascii_font
+            
+            # Font size
+            sz_elem = rpr_elem.find(f'{{{w_ns}}}sz')
+            if sz_elem is not None:
+                sz_val = sz_elem.get(f'{{{w_ns}}}val')
+                if sz_val:
+                    try:
+                        # Convert half-points to points
+                        from docx.shared import Pt
+                        run.font.size = Pt(int(sz_val) / 2)
+                    except ValueError:
+                        pass
+            
+            # Bold
+            b_elem = rpr_elem.find(f'{{{w_ns}}}b')
+            if b_elem is not None:
+                run.font.bold = True
+            
+            # Italic
+            i_elem = rpr_elem.find(f'{{{w_ns}}}i')
+            if i_elem is not None:
+                run.font.italic = True
+            
+            # Underline
+            u_elem = rpr_elem.find(f'{{{w_ns}}}u')
+            if u_elem is not None:
+                run.font.underline = True
+                
+        except Exception as e:
+            logger.debug(f"Failed to apply run format from XML: {e}")
     
     def _copy_run_format(self, source_run, target_run, source_para=None, target_para=None):
         """Safely copy run format"""
@@ -924,8 +1211,8 @@ class WordDocumentSplitter:
                                 target_rfonts = Element(f'{{{w_ns}}}rFonts')
                                 target_run.font._element.append(target_rfonts)
                             
-                            # Copy font attributes one by one, ensure eastAsia and other attributes are not lost
-                            font_attrs = ['ascii', 'eastAsia', 'hAnsi', 'cs']
+                            # Copy font attributes one by one, ensure eastAsia and theme fonts are not lost
+                            font_attrs = ['ascii', 'eastAsia', 'hAnsi', 'cs', 'asciiTheme', 'eastAsiaTheme', 'hAnsiTheme', 'csTheme']
                             for attr in font_attrs:
                                 font_value = source_rfonts.get(f'{{{w_ns}}}{attr}')
                                 if font_value:
@@ -954,14 +1241,27 @@ class WordDocumentSplitter:
                 except Exception:
                     pass
                 
-                # Font size
+                # Font size - improved handling for numeric font sizes
                 try:
                     if hasattr(source_run.font, 'size') and source_run.font.size:
                         target_run.font.size = source_run.font.size
-                    # Comment out font size inheritance logic, maintain original behavior
-                    # elif target_para and hasattr(target_para, '_default_font_size'):
-                    #     # If run has no font size, use default size from paragraph style
-                    #     target_run.font.size = target_para._default_font_size
+                    elif target_para and hasattr(target_para, '_default_font_size') and target_para._default_font_size:
+                        # If run has no font size, use default size from paragraph style
+                        target_run.font.size = target_para._default_font_size
+                    else:
+                        # Try to extract font size from XML if direct access fails
+                        try:
+                            if hasattr(source_run.font, '_element'):
+                                w_ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+                                sz_elem = source_run.font._element.find(f'.//{{{w_ns}}}sz')
+                                if sz_elem is not None:
+                                    sz_val = sz_elem.get(f'{{{w_ns}}}val')
+                                    if sz_val:
+                                        # Convert half-points to points (Word uses half-points internally)
+                                        from docx.shared import Pt
+                                        target_run.font.size = Pt(float(sz_val) / 2)
+                        except Exception:
+                            pass
                 except Exception:
                     pass
                 
@@ -1067,6 +1367,207 @@ class WordDocumentSplitter:
                     pass
         except Exception as e:
             logger.debug(f"Failed to copy run format: {e}")
+    
+    def _copy_hyperlink(self, source_run, target_run, source_para, target_para):
+        """Copy hyperlink from source run to target run"""
+        try:
+            # Check if source run is part of a hyperlink by examining the paragraph structure
+            if hasattr(source_para, '_element') and source_para._element is not None:
+                w_ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+                r_ns = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+                
+                # Find all hyperlink elements in the paragraph
+                hyperlink_elems = source_para._element.findall(f'.//{{{w_ns}}}hyperlink')
+                
+                for hyperlink_elem in hyperlink_elems:
+                    # Get all text content from the hyperlink
+                    hyperlink_text_elems = hyperlink_elem.findall(f'.//{{{w_ns}}}t')
+                    hyperlink_texts = [t.text for t in hyperlink_text_elems if t.text]
+                    hyperlink_full_text = ''.join(hyperlink_texts)
+                    
+                    # Check if this hyperlink text matches our source run text
+                    if hyperlink_full_text == source_run.text:
+                        # Found our run in a hyperlink, extract URL
+                        r_id = hyperlink_elem.get(f'{{{r_ns}}}id')
+                        anchor = hyperlink_elem.get(f'{{{w_ns}}}anchor')
+                        
+                        url = None
+                        if r_id:
+                            # Get the actual URL from document relationships
+                            try:
+                                source_doc_part = source_para._parent
+                                if hasattr(source_doc_part, 'part') and hasattr(source_doc_part.part, 'rels'):
+                                    rel = source_doc_part.part.rels[r_id]
+                                    if hasattr(rel, 'target_ref'):
+                                        url = rel.target_ref
+                            except Exception as e:
+                                logger.debug(f"Failed to get hyperlink URL from relationship: {e}")
+                        elif anchor:
+                            url = f"#{anchor}"
+                        
+                        if url:
+                            # Add hyperlink to target document
+                            self._add_hyperlink_to_run(target_run, url, target_run.text)
+                            return
+                        
+        except Exception as e:
+            logger.debug(f"Failed to copy hyperlink: {e}")
+    
+    def _add_hyperlink_to_run(self, run, url, text):
+        """Add hyperlink to a run"""
+        try:
+            # Get the paragraph that contains this run
+            paragraph = run._parent
+            document = paragraph._parent
+            
+            # Ensure Hyperlink style exists
+            self._ensure_hyperlink_style(document)
+            
+            # Find the exact run object in the paragraph's XML element
+            run_index = None
+            para_runs = paragraph._element.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}r')
+            
+            # Find the index of the run element in the paragraph's XML
+            for i, run_elem in enumerate(para_runs):
+                # Check if this is the same run element
+                if run._element == run_elem:
+                    run_index = i
+                    break
+            
+            if run_index is not None:
+                # Store run formatting
+                font_name = run.font.name
+                font_size = run.font.size
+                font_bold = run.font.bold
+                font_italic = run.font.italic
+                font_underline = run.font.underline
+                font_color = None
+                if hasattr(run.font, 'color') and run.font.color:
+                    if hasattr(run.font.color, 'rgb'):
+                        font_color = run.font.color.rgb
+                
+                # Store the position where we need to insert the hyperlink
+                # We need to find the position in the paragraph's children, not just runs
+                para_children = list(paragraph._element)
+                insert_position = None
+                
+                for i, child in enumerate(para_children):
+                    if child == run._element:
+                        insert_position = i
+                        break
+                
+                # Remove the original run
+                paragraph._element.remove(run._element)
+                
+                # Add hyperlink
+                from docx.oxml.shared import qn
+                from docx.oxml import parse_xml
+                
+                # Create hyperlink XML
+                w_ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+                r_ns = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+                
+                # Add relationship for external URL
+                if url.startswith('http') or url.startswith('www.'):
+                    # Add relationship to document
+                    doc_part = paragraph._parent.part
+                    rel_id = doc_part.relate_to(url, 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink', is_external=True)
+                    
+                    hyperlink_xml = f'''
+                    <w:hyperlink r:id="{rel_id}" xmlns:w="{w_ns}" xmlns:r="{r_ns}">
+                        <w:r>
+                            <w:rPr>
+                                <w:rStyle w:val="Hyperlink"/>
+                            </w:rPr>
+                            <w:t>{text}</w:t>
+                        </w:r>
+                    </w:hyperlink>
+                    '''
+                else:
+                    # Internal link (anchor)
+                    anchor = url.lstrip('#')
+                    hyperlink_xml = f'''
+                    <w:hyperlink w:anchor="{anchor}" xmlns:w="{w_ns}">
+                        <w:r>
+                            <w:rPr>
+                                <w:rStyle w:val="Hyperlink"/>
+                            </w:rPr>
+                            <w:t>{text}</w:t>
+                        </w:r>
+                    </w:hyperlink>
+                    '''
+                
+                hyperlink_elem = parse_xml(hyperlink_xml)
+                
+                # Insert hyperlink at the correct position
+                if insert_position is not None and insert_position < len(paragraph._element):
+                    paragraph._element.insert(insert_position, hyperlink_elem)
+                else:
+                    paragraph._element.append(hyperlink_elem)
+                
+                # Apply original formatting to hyperlink run
+                hyperlink_run = hyperlink_elem.find(f'.//{{{w_ns}}}r')
+                if hyperlink_run is not None:
+                    rpr = hyperlink_run.find(f'{{{w_ns}}}rPr')
+                    if rpr is not None:
+                        # Add font formatting
+                        if font_name:
+                            rfonts_xml = f'<w:rFonts w:ascii="{font_name}" w:eastAsia="{font_name}" w:hAnsi="{font_name}" w:cs="{font_name}" xmlns:w="{w_ns}"/>'
+                            rfonts_elem = parse_xml(rfonts_xml)
+                            rpr.append(rfonts_elem)
+                        
+                        if font_size:
+                            # Convert points to half-points
+                            half_points = int(font_size.pt * 2)
+                            sz_xml = f'<w:sz w:val="{half_points}" xmlns:w="{w_ns}"/>'
+                            sz_elem = parse_xml(sz_xml)
+                            rpr.append(sz_elem)
+                        
+                        if font_bold:
+                            b_xml = f'<w:b xmlns:w="{w_ns}"/>'
+                            b_elem = parse_xml(b_xml)
+                            rpr.append(b_elem)
+                        
+                        if font_italic:
+                            i_xml = f'<w:i xmlns:w="{w_ns}"/>'
+                            i_elem = parse_xml(i_xml)
+                            rpr.append(i_elem)
+                        
+                        if font_underline:
+                            u_xml = f'<w:u w:val="single" xmlns:w="{w_ns}"/>'
+                            u_elem = parse_xml(u_xml)
+                            rpr.append(u_elem)
+                        
+                        if font_color:
+                            color_xml = f'<w:color w:val="{str(font_color)}" xmlns:w="{w_ns}"/>'
+                            color_elem = parse_xml(color_xml)
+                            rpr.append(color_elem)
+                            
+        except Exception as e:
+            logger.warning(f"Failed to add hyperlink to run: {e}")
+            # If hyperlink creation fails, at least preserve the text
+            pass
+    
+    def _ensure_hyperlink_style(self, document):
+        """Ensure Hyperlink style exists in the document"""
+        try:
+            # Check if Hyperlink style already exists
+            for style in document.styles:
+                if style.name == 'Hyperlink':
+                    return  # Style already exists
+            
+            # Create Hyperlink style
+            from docx.enum.style import WD_STYLE_TYPE
+            from docx.shared import RGBColor
+            
+            hyperlink_style = document.styles.add_style('Hyperlink', WD_STYLE_TYPE.CHARACTER)
+            hyperlink_style.font.color.rgb = RGBColor(0, 0, 255)  # Blue color
+            hyperlink_style.font.underline = True
+            
+            logger.debug("Created Hyperlink style for document")
+            
+        except Exception as e:
+            logger.warning(f"Failed to create Hyperlink style: {e}")
     
     def _get_images_from_run(self, run, document_part):
         """Extract image data from run"""
